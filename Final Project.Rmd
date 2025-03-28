@@ -1,0 +1,407 @@
+---
+title: "Final Project"
+author: "Nabeel Vakil"
+date: "2025-03-21"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# loading the necessary packages
+library(tidyverse)
+library(janitor)
+library(astsa)
+library(MASS)
+library(xts)
+library(forecast)
+library(TSA)
+library(fGarch)
+```
+
+```{r}
+# loading in the data
+gold_prices <- read_csv("data/goldprices.csv")
+
+# tidying up the column names
+gold_prices <- gold_prices %>% 
+  clean_names()
+  
+# seeing the first 10 rows of the dataset
+gold_prices %>% 
+  head(10)
+
+# seeing the last 10 rows of the dataset
+gold_prices %>% 
+  tail(10)
+
+# converting the values specified as "null" to `NA` values
+gold_prices <- gold_prices %>% 
+  mutate(open = case_when(
+    open == "null" ~ NA,
+    .default = open
+  ),
+  high = case_when(
+    high == "null" ~ NA,
+    .default = high
+  ),
+  low = case_when(
+    low == "null" ~ NA,
+    .default = low
+  ),
+  close = case_when(
+    close == "null" ~ NA,
+    .default = close
+  ),
+  adj_close = case_when(
+    adj_close == "null" ~ NA,
+    .default = adj_close
+  ),
+  volume = case_when(
+    volume == "null" ~ NA,
+    .default = volume
+  ))
+
+# dropping the NAs
+gold_prices <- gold_prices %>% 
+  drop_na()
+
+# making the price and volume variables numeric
+gold_prices <- gold_prices %>% 
+  mutate(open = as.numeric(open),
+         high = as.numeric(high),
+         low = as.numeric(low),
+         close = as.numeric(close),
+         adj_close = as.numeric(adj_close),
+         volume = as.numeric(volume))
+
+# using a midpoint to come up with univariate price data
+gold_prices <- gold_prices %>% 
+  mutate(avg_price = (open + high + low + close)/4)
+```
+
+```{r}
+# seeing the first 10 rows of the cleaned dataset
+gold_prices %>% 
+  head(10)
+```
+
+```{r}
+# creating an xts object
+xts_gold_prices <- xts(gold_prices$avg_price, order.by = gold_prices$date)
+
+# verifying the number of rows in the dataset
+nrow(gold_prices)
+
+# verifying the number of observations in the xts object
+nrow(xts_gold_prices)
+
+# viewing the xts object
+head(xts_gold_prices)
+
+# plotting the xts object
+plot(xts_gold_prices, main = "Gold Prices Extensible Time Series", ylab = "Average Price", 
+     xlab = "Date")
+```
+
+```{r}
+# creating a time index column
+gold_prices <- gold_prices %>% 
+  mutate(time_index = 1:nrow(gold_prices))
+
+# creating a ts object
+ts_gold_prices <- ts(gold_prices$avg_price, start = 1, frequency = 1)
+
+# verifying the number of rows in the dataset
+nrow(gold_prices)
+
+# verifying the number of observations in the ts object
+length(ts_gold_prices)
+
+# viewing the ts object
+head(ts_gold_prices)
+
+# plotting the ts object
+plot(ts_gold_prices, main = "Gold Prices Time Series", ylab = "Average Price", 
+     xlab = "Time")
+```
+
+```{r}
+# getting actual prices to compare with forecasted prices from our models for later
+actual_prices <- gold_prices[2950:3150, ]
+
+# creating a ts object
+ts_actual_prices <- ts(actual_prices$avg_price, start = 1, frequency = 1)
+
+# plotting the ts object
+plot(ts_actual_prices, main = "Gold Prices Time Series", ylab = "Average Price", 
+     xlab = "Time")
+```
+
+```{r}
+gold_prices[3100, ]
+# keeping only up to row 3100 in the dataset, which goes up to February 7th, 2013, 
+# because gold prices crashed in 2013
+gold_prices <- gold_prices[1:3100, ]
+
+# creating a new ts object for the reduced dataset
+ts_gold_prices <- ts(gold_prices$avg_price, start = 1, frequency = 1)
+
+# verifying the number of rows in the reduced dataset
+nrow(gold_prices)
+
+# verifying the number of observations in the new ts object
+length(ts_gold_prices)
+
+# viewing the new ts object
+head(ts_gold_prices)
+
+# plotting the new ts object
+plot(ts_gold_prices, main = "Gold Prices Time Series", ylab = "Average Price", 
+     xlab = "Time")
+```
+
+```{r}
+# finding the optimal lambda for the Box-Cox power transformation to stabilize variance
+time_index <- 1:length(ts_gold_prices)
+lambda <- boxcox(ts_gold_prices ~ time_index, plotit = T)
+
+# extracting the optimal lambda
+optimal_lambda <- lambda$x[which.max(lambda$y)]
+
+# applying the Box-Cox transformation manually
+bc_ts_gold_prices <- (ts_gold_prices^optimal_lambda - 1) / optimal_lambda
+
+# viewing the transformed data
+head(bc_ts_gold_prices)
+
+# plotting the transformed data
+plot(bc_ts_gold_prices, main = "Box-Cox Transformed Data", 
+     ylab = "Transformed Average Price", xlab = "Time")
+```
+
+```{r}
+# differencing the data to remove the linear trend
+d_bc_ts_gold_prices <- diff(bc_ts_gold_prices, 1)
+
+# plotting the differenced data
+plot(d_bc_ts_gold_prices, main = "Differenced Data", ylab = "Differenced Average Price", 
+     xlab = "Time")
+```
+
+```{r}
+# checking the ACF and PACF plots
+acf(d_bc_ts_gold_prices, main = "ACF Plot of Gold Prices")
+pacf(d_bc_ts_gold_prices, main = "PACF Plot of Gold Prices")
+```
+
+```{r}
+# fitting models for model selection
+sarima(bc_ts_gold_prices, 1, 1, 1) # ARIMA(1, 1, 1), AICc = -9.817208, 
+# ^ AR(1) and MA(1) components are not significant
+sarima(bc_ts_gold_prices, 0, 1, 1) # ARIMA (0, 1, 1), AICc = -9.817589
+arima.fit <- sarima(bc_ts_gold_prices, 1, 1, 0) # ARIMA(1, 1, 0), AICc = -9.817515, optimal choice
+```
+
+```{r}
+# forecasting the next 60 days in the future of my dataset with ARIMA
+sarima.for(bc_ts_gold_prices, n.ahead = 60, 1, 1, 0)
+sarima.for(ts_gold_prices, n.ahead = 60, 1, 1, 0)
+```
+
+```{r}
+# getting the returns series from the price series
+d_log_ts_gold_prices <- diff(log(ts_gold_prices))
+plot(d_log_ts_gold_prices, main = "Gold Returns Time Series", ylab = "Return", 
+     xlab = "Time")
+
+## checking for GARCH behavior
+acf2(d_log_ts_gold_prices, main = "ACF and PACF Plots of Gold Returns")
+sarima(d_log_ts_gold_prices, 1, 0, 1) # ARIMA(1, 1, 1), AICc = -6.410395 
+sarima(d_log_ts_gold_prices, 0, 0, 1) # ARIMA(0, 1, 1), AICc = -6.410944 
+d_log_ts_gold_prices_fit <- sarima(d_log_ts_gold_prices, 1, 0, 0) # ARIMA(1, 1, 0), AICc = -6.410004, optimal choice
+
+# checking the squared residuals
+acf2(resid(d_log_ts_gold_prices_fit$fit)^2, main = "ACF and PACF Plots of Squared Residuals of Gold Returns")
+# ^ Autocorrelation structure in squared residuals suggests GARCH behavior
+
+# checking McLeod-Li and the squared residual plots to assess whether a GARCH type fit is appropriate
+McLeod.Li.test(y = d_log_ts_gold_prices)
+# ^ McLeod-Li test suggests a GARCH type fit is appropriate
+```
+
+```{r}
+# ARCH and GARCH fits 
+arch_fit <- garchFit(~arma(1, 0) + garch(1, 0), d_log_ts_gold_prices, cond.dist='std'); arch.fit
+garch_fit <- garchFit(~arma(1, 0) + garch(1, 1), d_log_ts_gold_prices, cond.dist='std'); garch.fit
+```
+
+```{r}
+# visualization of ARCH and GARCH fits
+plot(arch_fit, which = c(3,11))
+plot(garch_fit, which = c(3,11))
+```
+
+```{r}
+# extracting AIC and BIC for ARCH fit
+arch_aic <- arch_fit@fit$ics["AIC"]
+arch_bic <- arch_fit@fit$ics["BIC"]
+cat("AIC:", arch_aic, "\n")
+cat("BIC:", arch_bic, "\n")
+
+# plotting standardized residuals, ACF of standardized residuals, ACF of squared standardized residuals, and QQ-Plot of standardized residuals for ARCH fit
+par(mfrow = c(2, 2))  # 2 rows, 2 columns
+plot(arch_fit, which = c(9,10,11,13))
+
+# extracting standardized residuals for ARCH fit
+arch_std_residuals <- residuals(arch_fit, standardize = TRUE)
+
+# McLeod-Li test for remaining ARCH effects
+Box.test(arch_std_residuals^2, lag = 10, type = "Ljung-Box")
+```
+
+```{r}
+# extracting AIC and BIC for GARCH fit
+garch_aic <- garch_fit@fit$ics["AIC"]
+garch_bic <- garch_fit@fit$ics["BIC"]
+cat("AIC:", garch_aic, "\n")
+cat("BIC:", garch_bic, "\n")
+
+# plotting standardized residuals, ACF of standardized residuals, ACF of squared standardized residuals, and QQ-Plot of standardized residuals for GARCH fit
+par(mfrow = c(2, 2))  # 2 rows, 2 columns
+plot(garch_fit, which = c(9,10,11,13))
+
+# extracting standardized residuals for GARCH fit
+garch_std_residuals <- residuals(garch_fit, standardize = TRUE)
+
+# McLeod-Li test for remaining ARCH effects
+Box.test(garch_std_residuals^2, lag = 10, type = "Ljung-Box")
+```
+
+```{r}
+# forecasting the next 60 days in the future of my dataset with ARCH: 
+predict(arch_fit, n.ahead = 60, plot = TRUE)
+arch_pred <- predict(arch_fit, n.ahead = 60)
+
+# getting the last 150 prices from our reduced data
+original_prices <- gold_prices$avg_price[2950:3099]  
+last_price <- gold_prices$avg_price[3100]  
+original_time <- 1:length(original_prices)
+
+# getting the predicted returns and confidence intervals
+predicted_log_returns <- arch_pred$meanForecast  # predicted returns
+lower_log_returns <- arch_pred$meanForecast + arch_pred$meanError - 1.96 * arch_pred$standardDeviation  # lower bound returns
+upper_log_returns <- arch_pred$meanForecast + arch_pred$meanError + 1.96 * arch_pred$standardDeviation  # upper bound returns
+
+# initializing vectors for predicted prices and intervals
+predicted_prices <- numeric(length(predicted_log_returns) + 1)
+lower_prices <- numeric(length(predicted_log_returns) + 1)
+upper_prices <- numeric(length(predicted_log_returns) + 1)
+
+predicted_prices[1] <- last_price
+lower_prices[1] <- last_price
+upper_prices[1] <- last_price
+
+# iteratively calculating prices and intervals
+for (t in 2:length(predicted_prices)) {
+  predicted_prices[t] <- predicted_prices[t-1] * exp(predicted_log_returns[t-1])
+  lower_prices[t] <- lower_prices[t-1] * exp(lower_log_returns[t-1])
+  upper_prices[t] <- upper_prices[t-1] * exp(upper_log_returns[t-1])
+}
+
+# combining the original and predicted data
+combined_time <- c(original_time, (max(original_time) + 1):(max(original_time) + length(predicted_prices)))
+combined_prices <- c(original_prices, predicted_prices)
+combined_lower <- c(rep(NA, length(original_prices)), lower_prices)  # NA for original data
+combined_upper <- c(rep(NA, length(original_prices)), upper_prices)  # NA for original data
+
+# creating the plot
+plot(combined_time, combined_prices, type = "l", col = "black", lwd = 2,
+     xlab = "Time", ylab = "Price",
+     main = "Price Forecast with 95% Confidence Interval",
+     ylim = range(c(combined_prices, combined_lower, combined_upper), na.rm = TRUE))
+
+# adding historical data in black
+lines(combined_time[1:length(original_prices)], combined_prices[1:length(original_prices)], col = "black", lwd = 2)
+
+# adding predicted values in red
+lines(combined_time[(length(original_prices) + 1):length(combined_time)], 
+      combined_prices[(length(original_prices) + 1):length(combined_time)], col = "red", lwd = 2)
+
+# shading the area between the lower and upper bounds in gray
+polygon(c(combined_time[!is.na(combined_lower)], rev(combined_time[!is.na(combined_lower)])),
+        c(combined_lower[!is.na(combined_lower)], rev(combined_upper[!is.na(combined_lower)])),
+        col = rgb(0.5, 0.5, 0.5, 0.3), border = NA)  # Gray shading with transparency
+
+# adding a vertical line to separate historical and forecast periods
+abline(v = max(original_time), col = "black", lty = 2, lwd = 2)
+
+# adding a legend
+legend("topleft", legend = c("Historical Prices", "Predicted Prices", "95% Confidence Interval"),
+       col = c("black", "red", "gray"), lty = c(1, 1, 1), lwd = 2, bty = "n")
+```
+
+```{r}
+# forecasting the next 60 days in the future of my dataset with GARCH: 
+predict(garch_fit, n.ahead = 60, plot = TRUE)
+garch_pred <- predict(garch_fit, n.ahead = 60)
+
+# getting the last 150 prices from our reduced data
+original_prices <- gold_prices$avg_price[2950:3099]  
+last_price <- gold_prices$avg_price[3100]  
+original_time <- 1:length(original_prices)
+
+# getting the predicted returns and confidence intervals
+predicted_log_returns <- garch_pred$meanForecast  # predicted returns
+lower_log_returns <- garch_pred$meanForecast + garch_pred$meanError - 1.96 * garch_pred$standardDeviation  # lower bound returns
+upper_log_returns <- garch_pred$meanForecast + garch_pred$meanError + 1.96 * garch_pred$standardDeviation  # upper bound returns
+
+# initializing vectors for predicted prices and intervals
+predicted_prices <- numeric(length(predicted_log_returns) + 1)
+lower_prices <- numeric(length(predicted_log_returns) + 1)
+upper_prices <- numeric(length(predicted_log_returns) + 1)
+
+predicted_prices[1] <- last_price
+lower_prices[1] <- last_price
+upper_prices[1] <- last_price
+
+# iteratively calculating prices and intervals
+for (t in 2:length(predicted_prices)) {
+  predicted_prices[t] <- predicted_prices[t-1] * exp(predicted_log_returns[t-1])
+  lower_prices[t] <- lower_prices[t-1] * exp(lower_log_returns[t-1])
+  upper_prices[t] <- upper_prices[t-1] * exp(upper_log_returns[t-1])
+}
+
+# combining the original and predicted data
+combined_time <- c(original_time, (max(original_time) + 1):(max(original_time) + length(predicted_prices)))
+combined_prices <- c(original_prices, predicted_prices)
+combined_lower <- c(rep(NA, length(original_prices)), lower_prices)  # NA for original data
+combined_upper <- c(rep(NA, length(original_prices)), upper_prices)  # NA for original data
+
+# creating the plot
+plot(combined_time, combined_prices, type = "l", col = "black", lwd = 2,
+     xlab = "Time", ylab = "Price",
+     main = "Price Forecast with 95% Confidence Interval",
+     ylim = range(c(combined_prices, combined_lower, combined_upper), na.rm = TRUE))
+
+# adding historical data in black
+lines(combined_time[1:length(original_prices)], combined_prices[1:length(original_prices)], col = "black", lwd = 2)
+
+# adding predicted values in red
+lines(combined_time[(length(original_prices) + 1):length(combined_time)], 
+      combined_prices[(length(original_prices) + 1):length(combined_time)], col = "red", lwd = 2)
+
+# shading the area between the lower and upper bounds in gray
+polygon(c(combined_time[!is.na(combined_lower)], rev(combined_time[!is.na(combined_lower)])),
+        c(combined_lower[!is.na(combined_lower)], rev(combined_upper[!is.na(combined_lower)])),
+        col = rgb(0.5, 0.5, 0.5, 0.3), border = NA)  # Gray shading with transparency
+
+# adding a vertical line to separate historical and forecast periods
+abline(v = max(original_time), col = "black", lty = 2, lwd = 2)
+
+# adding a legend
+legend("topleft", legend = c("Historical Prices", "Predicted Prices", "95% Confidence Interval"),
+       col = c("black", "red", "gray"), lty = c(1, 1, 1), lwd = 2, bty = "n")
+```
